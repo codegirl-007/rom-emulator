@@ -1,7 +1,5 @@
 // This is all new to me so it's heavily commented so we can understand what is happening.
 
-use warp::filters::addr;
-
 #[derive(Debug)]
 #[allow(non_camel_case_types)]
 // AddressingMode is a mehtod used by a CPU to determine where the operand (data or memory
