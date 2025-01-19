@@ -19,6 +19,12 @@ pub struct CPU {
     pub status: u8,
     // track our current position in the program
     pub program_counter: u16,
+    // most commonly used to hold counters or offsets for accessing memory. The value can be loaded
+    // and saved in memory, compared with values held in memory or incremented and decremented.
+    //
+    // X register has one special function. It can be used to copy a stack pointer or change it's
+    // value.
+    pub register_x: u8,
 }
 
 impl CPU {
@@ -27,6 +33,7 @@ impl CPU {
             register_a: 0,
             status: 0,
             program_counter: 0,
+            register_x: 0,
         }
     }
 
@@ -72,11 +79,47 @@ impl CPU {
                         self.status = self.status & 0b1111_1101;
                     }
                 }
+                0xAA => {
+                    self.register_x = self.register_a;
+
+                    if self.register_x == 0 {
+                        self.status = self.status | 0b000_0010;
+                    } else {
+                        self.status = self.status & 0b1111_1101;
+                    }
+
+                    if self.register_x & 0b1000_0000 != 0 {
+                        self.status = self.status | 0b1000_0000;
+                    } else {
+                        self.status = self.status & 0b0111_1111;
+                    }
+                }
                 0x00 => {
                     return;
                 }
                 _ => todo!(),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lda_sets_register_a() {
+        let mut cpu = CPU::new();
+        cpu.interpret(vec![0xa9, 0x05, 0x00]);
+        assert_eq!(cpu.register_a, 0x05);
+        assert!(cpu.status & 0b0000_0010 == 0b00);
+        assert!(cpu.status & 0b1000_0000 == 0);
+    }
+
+    #[test]
+    fn test_0xa9_lda_zero_flag() {
+        let mut cpu = CPU::new();
+        cpu.interpret(vec![0xa9, 0x00, 0x00]);
+        assert!(cpu.status & 0b0000_0010 == 0b10);
     }
 }
