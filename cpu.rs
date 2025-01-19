@@ -67,6 +67,45 @@ pub struct CPU {
     memory: [u8; 0xFFFF],
 }
 
+trait Mem {
+    fn mem_read(&self, addr: u16) -> u8;
+
+    fn mem_write(&mut self, addr: u16, data: u8);
+
+    // combines two consecutives bytes in memory into a single 16 bit value
+    fn mem_read_u16(&mut self, pos: u16) -> u16 {
+        // read the low byte (pos)
+        let lo = self.mem_read(pos) as u16;
+        // read the high byte (pos + 1)
+        let hi = self.mem_read(pos + 1) as u16;
+        // combine the bytes. Shelf the high byte 8 bits to the left, effectively moving it into
+        // the upper 8 bits of a 16-bit value. This will combine to a single 16 bit value.
+        (hi << 8) | (lo as u16)
+    }
+
+    // split a 16-bit number into 2 8-bit pieces
+    fn mem_write_u16(&mut self, pos: u16, data: u16) {
+        // take the top half of the 16 bit number
+        let hi = (data >> 8) as u8;
+        // take the bottom half of the 16 bit number
+        let lo = (data & 0xff) as u8;
+        // store low byte in the first compartment of memory (pos)
+        self.mem_write(pos, lo);
+        // store the high byte in the next compartment (pos + 1)
+        self.mem_write(pos + 1, hi)
+    }
+}
+
+impl Mem for CPU {
+    fn mem_read(&self, addr: u16) -> u8 {
+        self.memory[addr as usize]
+    }
+
+    fn mem_write(&mut self, addr: u16, data: u8) {
+        self.memory[addr as usize] = data;
+    }
+}
+
 impl CPU {
     pub fn new() -> Self {
         CPU {
@@ -86,7 +125,7 @@ impl CPU {
     ///
     /// # Returns
     /// - A 16 bit memory address where the operand can be found
-    fn get_operand_address(&self, mode: &AddressingMode) -> u16 {
+    fn get_operand_address(&mut self, mode: &AddressingMode) -> u16 {
         match mode {
             // Immediate mode: The operand is part of the instruction itself, located at the
             // program counter
@@ -105,7 +144,7 @@ impl CPU {
             AddressingMode::ZeroPage_X => {
                 let pos = self.mem_read(self.program_counter);
                 let addr = pos.wrapping_add(self.register_x) as u16;
-                addr;
+                addr
             }
 
             // ZeroPage_Y mode: Similar to ZeroPage_X, but the address is calculated
@@ -184,37 +223,6 @@ impl CPU {
         }
     }
 
-    fn mem_read(&self, addr: u16) -> u8 {
-        self.memory[addr as usize]
-    }
-
-    fn mem_write(&mut self, addr: u16, data: u8) {
-        self.memory[addr as usize] = data;
-    }
-
-    // combines two consecutives bytes in memory into a single 16 bit value
-    fn mem_read_u16(&mut self, pos: u16) -> u16 {
-        // read the low byte (pos)
-        let lo = self.mem_read(pos) as u16;
-        // read the high byte (pos + 1)
-        let hi = self.mem_read(pos + 1) as u16;
-        // combine the bytes. Shelf the high byte 8 bits to the left, effectively moving it into
-        // the upper 8 bits of a 16-bit value. This will combine to a single 16 bit value.
-        (hi << 8) | (lo as u16)
-    }
-
-    // split a 16-bit number into 2 8-bit pieces
-    fn mem_write_u16(&mut self, pos: u16, data: u16) {
-        // take the top half of the 16 bit number
-        let hi = (data >> 8) as u8;
-        // take the bottom half of the 16 bit number
-        let lo = (data & 0xff) as u8;
-        // store low byte in the first compartment of memory (pos)
-        self.mem_write(pos, lo);
-        // store the high byte in the next compartment (pos + 1)
-        self.mem_write(pos + 1, hi)
-    }
-
     pub fn load_and_run(&mut self, program: Vec<u8>) {
         self.load(program);
         self.reset();
@@ -233,12 +241,15 @@ impl CPU {
     // from program ROM and we can assume that the instructions should start somewhere here.
     pub fn load(&mut self, program: Vec<u8>) {
         self.memory[0x8000..(0x8000 + program.len())].copy_from_slice(&program[..]);
-        self.mem_write(0xFFFC, 0x8000);
+        self.mem_write_u16(0xFFFC, 0x8000);
     }
 
     // LDA stands for Load Accumulator. It loads a value into the accumulator register. It affects
     // the Zero Flag and Negative Flag.
-    fn lda(&mut self, value: u8) {
+    fn lda(&mut self, mode: &AddressingMode) {
+        let addr = self.get_operand_address(mode);
+        let value = self.mem_read(addr);
+
         self.register_a = value;
         self.update_zero_and_negative_flags(self.register_a);
     }
@@ -248,6 +259,10 @@ impl CPU {
         self.update_zero_and_negative_flags(self.register_x);
     }
 
+    fn sta(&mut self, mode: &AddressingMode) {
+        let addr = self.get_operand_address(mode);
+        self.mem_write(addr, self.register_a);
+    }
     fn update_zero_and_negative_flags(&mut self, result: u8) {
         // update the status register
         if result == 0 {
@@ -302,16 +317,24 @@ impl CPU {
                 // instruction itself, rather than being fetched from memory or calculated
                 // directly.
                 0xA9 => {
-                    // fetch the next byte in program. This byte is the immediate value to load
-                    // into the accumulator (register_a)
-                    let param = program[self.program_counter as usize];
-                    // Increment program counter to point to the next instruction after the
-                    // parameter. The program counter must always point to the next instruction to
-                    // be executed.
+                    self.lda(&AddressingMode::Immediate);
                     self.program_counter += 1;
-                    // store the fetch parameter in register_a - handling the actual loading of the
-                    // value into the accumulator and updates the CPU flags.
-                    self.lda(param);
+                }
+                0xA5 => {
+                    self.lda(&AddressingMode::ZeroPage);
+                    self.program_counter += 1;
+                }
+                0xAD => {
+                    self.lda(&AddressingMode::Absolute);
+                    self.program_counter += 2;
+                }
+                0x85 => {
+                    self.sta(&AddressingMode::ZeroPage);
+                    self.program_counter += 1;
+                }
+                0x95 => {
+                    self.sta(&AddressingMode::ZeroPage);
+                    self.program_counter += 1;
                 }
                 // implement the 0xAA opcode which corresponds to the TAX (transfer acculumater to
                 // X register)
@@ -349,8 +372,7 @@ mod tests {
     #[test]
     fn test_0xaa_tax_move_to_a_to_x() {
         let mut cpu = CPU::new();
-        cpu.register_a = 10;
-        cpu.load_and_run(vec![0xaa, 0x00]);
+        cpu.load_and_run(vec![0xa9, 0x0A, 0xaa, 0x00]);
 
         assert_eq!(cpu.register_x, 10)
     }
@@ -366,8 +388,7 @@ mod tests {
     #[test]
     fn test_inx_overflow() {
         let mut cpu = CPU::new();
-        cpu.register_x = 0xff;
-        cpu.load_and_run(vec![0xe8, 0xe8, 0x00]);
+        cpu.load_and_run(vec![0xa9, 0xff, 0xaa, 0xe8, 0xe8, 0x00]);
 
         assert_eq!(cpu.register_x, 1)
     }
