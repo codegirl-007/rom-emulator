@@ -1,10 +1,17 @@
 // This is all new to me so it's heavily commented so we can understand what is happening.
 
+use warp::filters::addr;
+
 #[derive(Debug)]
 #[allow(non_camel_case_types)]
 // AddressingMode is a mehtod used by a CPU to determine where the operand (data or memory
 // location) for an instruction comes from. It basically defines how the CPU finds the data it
 // needs to execute a given instruction.
+//
+// The zero page term refers to the first 256 bytes (from 0x0000 to 0x00FF). It's called zero page
+// because the high page is always zero (e.g. 00XX). Instructions in this range use fewer bytes and
+// cycles compared to acessing memory in other regions. This is due to the fact that only the low
+// bytes need to be specified which makes the instruction shorter and faster.
 pub enum AddressingMode {
     // Operand is provided directly as part of the instruction
     Immediate,
@@ -29,11 +36,11 @@ pub enum AddressingMode {
 }
 
 pub struct CPU {
-    // the accumulator register is a specific register used for arithmetic and logic operations
-    // the cpu instruction loads a value into the accumulator register and then updates certain
-    // flags in the processor status register to relect the operation of the result
+    // The accumulator register is a specific register used for arithmetic and logic operations.
+    // The cpu instruction loads a value into the accumulator register and then updates certain
+    // flags in the processor status register to relect the operation of the result.
     pub register_a: u8,
-    // THe Process Status Register is a collection of individual bits (flags) that represent the
+    // The Process Status Register is a collection of individual bits (flags) that represent the
     // current state of the CPU. Each bit has purpose such as if a calculation resulted in zero or
     // if the result is negative
     //
@@ -72,20 +79,107 @@ impl CPU {
         }
     }
 
+    /// Determines the memory address for the operand based on the specified addressing mode.
+    ///
+    /// # Arguments
+    /// - `mode`: The addressing mode, which speicifies how the oeprand is accessed.
+    ///
+    /// # Returns
+    /// - A 16 bit memory address where the operand can be found
     fn get_operand_address(&self, mode: &AddressingMode) -> u16 {
         match mode {
+            // Immediate mode: The operand is part of the instruction itself, located at the
+            // program counter
             AddressingMode::Immediate => self.program_counter,
+
+            // ZeroPage mode: The operand is in the zero page (first 256 bytes of memory), with the
+            // address specificed as a single byte at the program counter.
             AddressingMode::ZeroPage => self.mem_read(self.program_counter) as u16,
+
+            // Absolute mode: The operand's address is a full 16-bit address, stored in two
+            // consecutive bytes starting at the program counter
             AddressingMode::Absolute => self.mem_read_u16(self.program_counter),
+
+            // ZeroPage_X mode: The operand is in the zero page, with it's address calculated by
+            // adding the X register to a base address stored at the program counter
             AddressingMode::ZeroPage_X => {
                 let pos = self.mem_read(self.program_counter);
                 let addr = pos.wrapping_add(self.register_x) as u16;
                 addr;
             }
+
+            // ZeroPage_Y mode: Similar to ZeroPage_X, but the address is calculated
+            // using the Y register instead of the X register.
             AddressingMode::ZeroPage_Y => {
                 let pos = self.mem_read(self.program_counter);
                 let addr = pos.wrapping_add(self.register_y) as u16;
                 addr
+            }
+
+            // Absolute_X mode: The operand's address is calculated by adding the X register
+            // to a 16-bit base address stored at the program counter.
+            AddressingMode::Absolute_X => {
+                let base = self.mem_read_u16(self.program_counter);
+                let addr = base.wrapping_add(self.register_x as u16);
+                addr
+            }
+
+            // Absolute_Y mode: Similar to Absolute_X, but the address is calculated
+            // by adding the Y register to the 16-bit base address.
+            AddressingMode::Absolute_Y => {
+                let base = self.mem_read_u16(self.program_counter);
+                let addr = base.wrapping_add(self.register_x as u16);
+                addr
+            }
+
+            // Indirect_X mode: The operand's address is calculated by first adding the X register
+            // to a zero-page base address, then fetching the actual 16-bit address from
+            // the zero page.
+            AddressingMode::Indirect_X => {
+                // read the single byte from the program counter. This is our base.
+                let base = self.mem_read(self.program_counter);
+                // Take the base and add the value in the X register. If the result goes passed
+                // 0xFF, it wraps back around to 0x00 (like starting over in a circle). This is
+                // essentially behaving like a ring buffer. Using wrapping_add ensures the
+                // calculation stays within the valid range without requiring additional checks
+                let ptr: u8 = (base as u8).wrapping_add(self.register_x);
+                // Read the low byte of the memory address from memory at ptr. The goal here is
+                // to fetch the 16 byte address from the zero page using the pointer.
+                let lo = self.mem_read(ptr as u16);
+                // read the high byte of the memory address from memory at ptr + 1
+                let hi = self.mem_read(ptr.wrapping_add(1) as u16);
+                // take the high byte and shift it left by 8 bits to place it in the upper half of
+                // the 16 bit value. Then take the low byte and keep it in the lower half of the 16
+                // bit value. Combine the two values using the bitwise OR (|) operator to form a
+                // full 16 bit value.
+                (hi as u16) << 8 | (lo as u16)
+            }
+
+            // Indirect_Y mode: The operand's address is calculated by first fetching a 16-bit address
+            // from a zero-page base address, then adding the Y register to it.
+            AddressingMode::Indirect_Y => {
+                // read from the program counter (an 8 bit value). This pointer specifies a zero
+                // page address where the actual 16 bit address is stored.
+                let base = self.mem_read(self.program_counter);
+                // read the low byte of the final address from the zero page address specificed by
+                // `base`
+                let lo = self.mem_read(base as u16);
+                // read the high byte of the final address from the next consecutive zero-page
+                // address (base +1). wrapping_add(1) ensures that if base = 0xFF, it wraps around
+                // the 0x00
+                let hi = self.mem_read((base as u8).wrapping_add(1) as u16);
+                // Combine the low and high bytes into a 16 bit address
+                let deref_base = (hi as u16) << 8 | (lo as u16);
+                // Add the Y Registered to the dereferenced address
+                let deref = deref_base.wrapping_add(self.register_y as u16);
+                // Return the final address
+                deref
+            }
+
+            // NoneAddressing: This mode is used for instructions that don't require an operand
+            // or don't involve memory access.
+            AddressingMode::NoneAddressing => {
+                panic!("mode {:?} is not supported", mode);
             }
         }
     }
