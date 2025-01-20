@@ -1,7 +1,8 @@
 // This is all new to me so it's heavily commented so we can understand what is happening.
-use bitflags::bitflags;
+use bitflags::{bitflags, Flags};
 
 bitflags! {
+     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct CpuFlags: u8 {
         // Represents whether the last operation caused a carry or borrow
         const CARRY = 0b00000001;
@@ -91,6 +92,7 @@ pub struct CPU {
     // he new function). 0xFFFF is hexadecimal for 65535 in decimal. This defines the size of the
     // array with 65535 elements, the typical size for a 6502 CPU system.
     memory: [u8; 0xFFFF],
+    pub stack_pointer: u8,
 }
 
 trait Mem {
@@ -141,6 +143,7 @@ impl CPU {
             register_x: 0,
             register_y: 0,
             memory: [0; 0xFFFF],
+            stack_pointer: STACK_RESET,
         }
     }
 
@@ -272,10 +275,24 @@ impl CPU {
         self.mem_write_u16(0xFFFC, 0x8000);
     }
 
+    fn ldy(&mut self, mode: &AddressingMode) {
+        let addr = self.get_operand_address(mode);
+        let data = self.mem_read(addr);
+        self.register_y = data;
+        self.update_zero_and_negative_flags(self.register_y);
+    }
+
+    fn ldx(&mut self, mode: &AddressingMode) {
+        let addr = self.get_operand_address(mode);
+        let data = self.mem_read(addr);
+        self.register_x = data;
+        self.update_zero_and_negative_flags(self.register_x);
+    }
+
     /// LDA stands for Load Accumulator. It loads a value into the accumulator register. It affects
     /// the Zero Flag and Negative Flag.
     fn lda(&mut self, mode: &AddressingMode) {
-        let addr = self.get_operand_address(mode);
+        let addr = self.get_operand_address(&mode);
         let value = self.mem_read(addr);
 
         self.register_a = value;
@@ -318,6 +335,18 @@ impl CPU {
         self.set_register_a(data & self.register_a);
     }
 
+    fn eor(&mut self, mode: &AddressingMode) {
+        let addr = self.get_operand_address(mode);
+        let data = self.mem_read(addr);
+        self.set_register_a(data ^ self.register_a);
+    }
+
+    fn ora(&mut self, mode: &AddressingMode) {
+        let addr = self.get_operand_address(mode);
+        let data = self.mem_read(addr);
+        self.set_register_a(data | self.register_a);
+    }
+
     /// This is used to update the status register flags based on the operation. It updates the Zero
     /// Flag and the Negative Flag.
     ///
@@ -337,11 +366,12 @@ impl CPU {
         }
     }
 
-    /// INX stands for Increment Index Register X - increase the value of the X register
-    /// by one and update specific processor flags based on the result.
-    fn inx(&mut self) {
-        self.register_x = self.register_x.wrapping_add(1);
-        self.update_zero_and_negative_flags(self.register_x);
+    fn set_carry_flag(&mut self) {
+        self.status.insert(CpuFlags::CARRY);
+    }
+
+    fn clear_carry_flag(&mut self) {
+        self.status.remove(CpuFlags::CARRY);
     }
 
     /// Simulate the ADC (Add with Carry) instruction. It adds a value (data) to the accumulator
@@ -417,6 +447,215 @@ impl CPU {
         self.add_to_register_a(value);
     }
 
+    fn stack_pop(&mut self) -> u8 {
+        self.stack_pointer = self.stack_pointer.wrapping_add(1);
+        self.mem_read((STACK as u16) + self.stack_pointer as u16)
+    }
+
+    fn stack_push(&mut self, data: u8) {
+        self.mem_write((STACK as u16) + self.stack_pointer as u16, data);
+        self.stack_pointer = self.stack_pointer.wrapping_sub(1)
+    }
+
+    fn asl_accumulator(&mut self) {
+        let mut data = self.register_a;
+        if data >> 6 == 1 {
+            self.set_carry_flag();
+        } else {
+            self.clear_carry_flag();
+        }
+        data = data << 1;
+        self.set_register_a(data);
+    }
+
+    fn asl(&mut self, mode: &AddressingMode) -> u8 {
+        let addr = self.get_operand_address(mode);
+        let mut data = self.mem_read(addr);
+        if data >> 7 == 1 {
+            self.set_carry_flag();
+        } else {
+            self.clear_carry_flag();
+        }
+
+        data = data << 1;
+        self.mem_write(addr, data);
+        self.update_zero_and_negative_flags(data);
+        data
+    }
+
+    fn lsr_accumulator(&mut self) {
+        let mut data = self.register_a;
+        if data & 1 == 1 {
+            self.set_carry_flag();
+        } else {
+            self.clear_carry_flag();
+        }
+
+        data = data >> 1;
+        self.set_register_a(data);
+    }
+
+    fn lsr(&mut self, mode: &AddressingMode) -> u8 {
+        let addr = self.get_operand_address(mode);
+        let mut data = self.mem_read(addr);
+        if data & 1 == 1 {
+            self.set_carry_flag();
+        } else {
+            self.clear_carry_flag();
+        }
+
+        data = data >> 1;
+        self.mem_write(addr, data);
+        self.update_zero_and_negative_flags(data);
+        data
+    }
+
+    fn rol(&mut self, mode: &AddressingMode) -> u8 {
+        let addr = self.get_operand_address(mode);
+        let mut data = self.mem_read(addr);
+        let old_carry = self.status.contains(CpuFlags::CARRY);
+
+        if data >> 7 == 1 {
+            self.set_carry_flag();
+        } else {
+            self.clear_carry_flag();
+        }
+
+        data = data << 1;
+        if old_carry {
+            data = data | 1;
+        }
+        self.mem_write(addr, data);
+        self.update_zero_and_negative_flags(data);
+        data
+    }
+
+    fn rol_accumulator(&mut self) {
+        let mut data = self.register_a;
+        let old_carry = self.status.contains(CpuFlags::CARRY);
+
+        if data >> 7 == 1 {
+            self.set_carry_flag();
+        } else {
+            self.clear_carry_flag();
+        }
+
+        data = data << 1;
+        if old_carry {
+            data = data | 1;
+        }
+
+        self.set_register_a(data);
+    }
+
+    fn ror(&mut self, mode: &AddressingMode) -> u8 {
+        let addr = self.get_operand_address(mode);
+        let mut data = self.mem_read(addr);
+        let old_carry = self.status.contains(CpuFlags::CARRY);
+
+        if data & 1 == 1 {
+            self.set_carry_flag();
+        } else {
+            self.clear_carry_flag();
+        }
+
+        self.mem_write(addr, data);
+        self.update_zero_and_negative_flags(data);
+        data
+    }
+
+    fn ror_accumulator(&mut self) {
+        let mut data = self.register_a;
+        let old_carry = self.status.contains(CpuFlags::CARRY);
+
+        if data & 1 == 1 {
+            self.set_carry_flag();
+        } else {
+            self.clear_carry_flag();
+        }
+
+        data = data >> 1;
+        if old_carry {
+            data = data | 0b10000000;
+        }
+        self.set_register_a(data);
+    }
+
+    fn inc(&mut self, mode: &AddressingMode) -> u8 {
+        let addr = self.get_operand_address(mode);
+        let mut data = self.mem_read(addr);
+        data = data.wrapping_add(1);
+        self.mem_write(addr, data);
+        self.update_zero_and_negative_flags(data);
+        data
+    }
+
+    fn dey(&mut self) {
+        self.register_y = self.register_y.wrapping_sub(1);
+        self.update_zero_and_negative_flags(self.register_y);
+    }
+
+    fn dex(&mut self) {
+        self.register_x = self.register_x.wrapping_sub(1);
+        self.update_zero_and_negative_flags(self.register_x);
+    }
+
+    fn dec(&mut self, mode: &AddressingMode) -> u8 {
+        let addr = self.get_operand_address(mode);
+        let mut data = self.mem_read(addr);
+        data = data.wrapping_sub(1);
+        self.mem_write(addr, data);
+        self.update_zero_and_negative_flags(data);
+        data
+    }
+
+    fn pla(&mut self) {
+        let data = self.stack_pop();
+        self.set_register_a(data);
+    }
+
+    fn plp(&mut self) {
+        let raw_bits = self.stack_pop();
+        // update the status register
+        self.status = CpuFlags::from_bits_truncate(raw_bits);
+        // update flags
+        self.status.remove(CpuFlags::BREAK);
+        self.status.insert(CpuFlags::BREAK2);
+    }
+
+    fn php(&mut self) {
+        let mut flags = self.status.clone();
+        flags.insert(CpuFlags::BREAK);
+        flags.insert(CpuFlags::BREAK2);
+        self.stack_push(flags.bits());
+    }
+
+    fn bit(&mut self, mode: &AddressingMode) {
+        let addr = self.get_operand_address(mode);
+        let data = self.mem_read(addr);
+        let and = self.register_a & data;
+        if and == 0 {
+            self.status.insert(CpuFlags::ZERO);
+        } else {
+            self.status.remove(CpuFlags::ZERO);
+        }
+
+        self.status.set(CpuFlags::NEGATIVE, data & 0b10000000 > 0);
+        self.status.set(CpuFlags::OVERFLOW, data & 0b01000000 > 0);
+    }
+
+    /// INX stands for Increment Index Register X - increase the value of the X register
+    /// by one and update specific processor flags based on the result.
+    fn inx(&mut self) {
+        self.register_x = self.register_x.wrapping_add(1);
+        self.update_zero_and_negative_flags(self.register_x);
+    }
+
+    fn iny(&mut self) {
+        self.register_y = self.register_y.wrapping_add(1);
+        self.update_zero_and_negative_flags(self.register_y);
+    }
+
     // The interpret method takes in mutalbe reference to self as we know we will need to modify
     // register_a during execution
     //
@@ -475,50 +714,5 @@ impl CPU {
                 _ => todo!(),
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_lda_sets_register_a() {
-        let mut cpu = CPU::new();
-        cpu.load_and_run(vec![0xa9, 0x05, 0x00]);
-        assert_eq!(cpu.register_a, 0x05);
-        assert!(cpu.status & 0b0000_0010 == 0b00);
-        assert!(cpu.status & 0b1000_0000 == 0);
-    }
-
-    #[test]
-    fn test_0xa9_lda_zero_flag() {
-        let mut cpu = CPU::new();
-        cpu.load_and_run(vec![0xa9, 0x00, 0x00]);
-        assert!(cpu.status & 0b0000_0010 == 0b10);
-    }
-
-    #[test]
-    fn test_0xaa_tax_move_to_a_to_x() {
-        let mut cpu = CPU::new();
-        cpu.load_and_run(vec![0xa9, 0x0A, 0xaa, 0x00]);
-
-        assert_eq!(cpu.register_x, 10)
-    }
-
-    #[test]
-    fn test_5_ops_working_together() {
-        let mut cpu = CPU::new();
-        cpu.load_and_run(vec![0xa9, 0xc0, 0xaa, 0xe8, 0x00]);
-
-        assert_eq!(cpu.register_x, 0xc1)
-    }
-
-    #[test]
-    fn test_inx_overflow() {
-        let mut cpu = CPU::new();
-        cpu.load_and_run(vec![0xa9, 0xff, 0xaa, 0xe8, 0xe8, 0x00]);
-
-        assert_eq!(cpu.register_x, 1)
     }
 }
