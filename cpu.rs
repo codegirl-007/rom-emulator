@@ -1,8 +1,36 @@
 // This is all new to me so it's heavily commented so we can understand what is happening.
+use bitflags::bitflags;
+
+bitflags! {
+    pub struct CpuFlags: u8 {
+        // Represents whether the last operation caused a carry or borrow
+        const CARRY = 0b00000001;
+        // Set if the result of the last operation was zero
+        const ZERO = 0b00000010;
+        // Disables interrupts when set
+        const INTERRUPT_DISABLE = 0b00000100;
+        // Enables binary-coded decimal arithmetic
+        const DECIMAL_MODE = 0b00001000;
+        // Indicates the CPU is handling in interupt
+        const BREAK = 0b00010000;
+        // A duplicate "break" flag, as both bit 4 and 5 are set by the BRK instruction
+        // Bit 5 is not explicitly used on NES
+        const BREAK2 = 0b00100000;
+        // Set if an arithmetic operation caused an overflow (adding two positive numbers results
+        // in a negative value)
+        const OVERFLOW = 0b01000000;
+        // Indicates whether the result of the last operation was negative - determined by the MSB
+        // of the result
+        const NEGATIVE = 0b10000000;
+    }
+}
+
+const STACK: u16 = 0x0100;
+const STACK_RESET: u8 = 0xfd;
 
 #[derive(Debug)]
 #[allow(non_camel_case_types)]
-// AddressingMode is a mehtod used by a CPU to determine where the operand (data or memory
+// AddressingMode is a method used by a CPU to determine where the operand (data or memory
 // location) for an instruction comes from. It basically defines how the CPU finds the data it
 // needs to execute a given instruction.
 //
@@ -19,7 +47,7 @@ pub enum AddressingMode {
     ZeroPage_X,
     // Operand is in the zero page, with an offet from the Y register
     ZeroPage_Y,
-    // Operand is at the full 16bit address (0x0000 to 0xFFFF)
+    // Operand is at the full 16-bit address (0x0000 to 0xFFFF)
     Absolute,
     // Operand is at an absolute address, with an offset from the X register
     Absolute_X,
@@ -49,7 +77,7 @@ pub struct CPU {
     // Negative flag (N) - indicates whether the result of the most recent operation is negative
     // - Bit 7 of the status register (most significant bit is Bit 7 because it's zero based)
     // - Set if the most significant bit of register_a is 1, cleared otherwise
-    pub status: u8,
+    pub status: CpuFlags,
     // track our current position in the program
     pub program_counter: u16,
     // most commonly used to hold counters or offsets for accessing memory. The value can be loaded
@@ -108,7 +136,7 @@ impl CPU {
     pub fn new() -> Self {
         CPU {
             register_a: 0,
-            status: 0,
+            status: CpuFlags::from_bits_truncate(0b100100),
             program_counter: 0,
             register_x: 0,
             register_y: 0,
@@ -221,29 +249,31 @@ impl CPU {
         }
     }
 
+    /// Road the program, reset the state of the cpu and then run the program.
     pub fn load_and_run(&mut self, program: Vec<u8>) {
         self.load(program);
         self.reset();
         self.run();
     }
 
+    /// Reset the state of the CPU
     pub fn reset(&mut self) {
         self.register_a = 0;
         self.register_x = 0;
-        self.status = 0;
+        self.status = CpuFlags::from_bits_truncate(0b100100);
 
         self.program_counter = self.mem_read_u16(0xFFFC);
     }
 
-    // load the program code into memroy starting at address 0x8000. 0x8000 .. 0xFFFF is reserved
-    // from program ROM and we can assume that the instructions should start somewhere here.
+    /// Load the program code into memroy starting at address 0x8000. 0x8000 .. 0xFFFF is reserved
+    /// from program ROM and we can assume that the instructions should start somewhere here.
     pub fn load(&mut self, program: Vec<u8>) {
         self.memory[0x8000..(0x8000 + program.len())].copy_from_slice(&program[..]);
         self.mem_write_u16(0xFFFC, 0x8000);
     }
 
-    // LDA stands for Load Accumulator. It loads a value into the accumulator register. It affects
-    // the Zero Flag and Negative Flag.
+    /// LDA stands for Load Accumulator. It loads a value into the accumulator register. It affects
+    /// the Zero Flag and Negative Flag.
     fn lda(&mut self, mode: &AddressingMode) {
         let addr = self.get_operand_address(mode);
         let value = self.mem_read(addr);
@@ -252,38 +282,139 @@ impl CPU {
         self.update_zero_and_negative_flags(self.register_a);
     }
 
+    /// TAX instruction copies the value from teh accumulator register (register_a) into the x
+    /// register. The way this works is that the CPU takes the current value in the A register,
+    /// copies it to the X register, updates the Zero Flag and Negative Flag in the status register.
+    ///
+    /// The Zero Flag is set if the value is copied to the X register is 0
+    /// The Negative Flag is set if the most significant bit of the vlaue (Bit 7) is 1
+    ///
+    /// In the TAX instruction, we don't need any arguments because it always stransfers data from A
+    /// to X.
     fn tax(&mut self) {
         self.register_x = self.register_a;
         self.update_zero_and_negative_flags(self.register_x);
     }
 
+    /// STA stands for Store Accumulator. This instruction takes the value in the accumulator
+    /// register (register_a) and stores it in a specified memory location.
+    ///
+    /// How this works is that the CPU reads the value currently in the accumulator (register_a)
+    /// The CPu then writes this value to the specified memory address.
     fn sta(&mut self, mode: &AddressingMode) {
         let addr = self.get_operand_address(mode);
         self.mem_write(addr, self.register_a);
     }
+
+    /// Perform a bitwise AND operation betwen the value in register_a and a value fetched from
+    /// memory (determined by the addressing mode)
+    ///
+    /// The result is stored back in register_a. This is useful for isolating specific bits in the
+    /// accumulator.
+    fn and(&mut self, mode: &AddressingMode) {
+        let addr = self.get_operand_address(mode);
+        let data = self.mem_read(addr);
+
+        self.set_register_a(data & self.register_a);
+    }
+
+    /// This is used to update the status register flags based on the operation. It updates the Zero
+    /// Flag and the Negative Flag.
+    ///
+    /// This will ensure that the CPU's status register reflects whether the result is zerl (update
+    /// the Zero Flag) and if the result is negative (update the Negative Flag)
     fn update_zero_and_negative_flags(&mut self, result: u8) {
-        // update the status register
         if result == 0 {
-            // 0b000_0010 represents a number where only the second bit (bit 1) is set
-            // to 1 and all other bits are 0
-            self.status = self.status | 0b000_0010;
+            self.status.insert(CpuFlags::ZERO)
         } else {
-            // 0b1111_1101 represents a number where only bit 1 is 0 and the rest are 1
-            self.status = self.status & 0b1111_1101;
+            self.status.remove(CpuFlags::ZERO);
         }
 
         if result & 0b1000_000 != 0 {
-            self.status = self.status | 0b100_0000;
+            self.status.insert(CpuFlags::NEGATIVE)
         } else {
-            self.status = self.status & 0b0111_1111;
+            self.status.remove(CpuFlags::NEGATIVE);
         }
     }
 
-    // INX stands for Increment Index Register X - increase the value of the X register
-    // by one and update specific processor flags based on the result.
+    /// INX stands for Increment Index Register X - increase the value of the X register
+    /// by one and update specific processor flags based on the result.
     fn inx(&mut self) {
         self.register_x = self.register_x.wrapping_add(1);
         self.update_zero_and_negative_flags(self.register_x);
+    }
+
+    /// Simulate the ADC (Add with Carry) instruction. It adds a value (data) to the accumulator
+    /// register (register_a), optionally including the carry flag and updates the status falgs
+    /// accordingly.
+    fn add_to_register_a(&mut self, data: u8) {
+        // Add register_a, data and carry flag togehter. All values are cast to u16 to prevent
+        // overflow during the calculation (since the result might exceed 8 bits).
+        let sum = self.register_a as u16
+            + data as u16
+            + (if self.status.contains(CpuFlags::CARRY) {
+                1
+            } else {
+                0
+            }) as u16;
+
+        let carry = sum > 0xff;
+
+        // the carry flag is set if the result exceeds 255 (0xFF), meaning the additon produced a
+        // value that requires more than 8 bits to store.
+        if carry {
+            // this happens if the sum = 0x101
+            self.status.insert(CpuFlags::CARRY);
+        } else {
+            // this happens if sum = 0xFE
+            self.status.remove(CpuFlags::CARRY);
+        }
+
+        // reduce the sum down to a u8 which will discord any overflow beyond 8 bits
+        let result = sum as u8;
+
+        // update the overflow flag to be set if there is a signed arithmetic overflow.
+        // A signed arithmetic overflow occurs when adding two signed numbers produces a result
+        // that is outside th range of a signed 8-bit value (-128 to 127)
+        //
+        // `data ^ result` checks if the sign of data is different from the sign of result
+        // `result ^ self.register_a` checks if the sign of result is different from the sign of
+        // register_a.
+        // `& 0x80` isolates the most significant bit whcih indicates the sign in signed arithmetic.
+        if (data ^ result) & (result ^ self.register_a) & 0x80 != 0 {
+            self.status.insert(CpuFlags::OVERFLOW)
+        } else {
+            self.status.remove(CpuFlags::OVERFLOW);
+        }
+
+        // store the final 8-bit result back in the accumulator
+        self.set_register_a(result);
+    }
+
+    /// This will set the value of the A register (register_A)
+    fn set_register_a(&mut self, value: u8) {
+        self.register_a = value;
+        self.update_zero_and_negative_flags(self.register_a);
+    }
+
+    /// SBC stands for Subtract with Borrow. It is the counter to ADC (Add with Carry) instruction
+    /// and performs subtraction while considering the Carry Flag. This works with unsigned binary
+    /// numbers or two's complement signed numbers.
+    ///
+    /// The Carry flag represents the absence of a borrow.
+    /// The Overflow flag is set if the result goes outside the range of a signed 8-bit value
+    /// The Negative flag and Zero flag are updated based on the result
+    fn sbc(&mut self, mode: &AddressingMode) {
+        let addr = self.get_operand_address(mode);
+        let data = self.mem_read(addr);
+        self.add_to_register_a(((data as i8).wrapping_neg().wrapping_sub(1)) as u8);
+    }
+
+    /// ADC stands for Add with Carry
+    fn adc(&mut self, mode: &AddressingMode) {
+        let addr = self.get_operand_address(mode);
+        let value = self.mem_read(addr);
+        self.add_to_register_a(value);
     }
 
     // The interpret method takes in mutalbe reference to self as we know we will need to modify
@@ -304,7 +435,7 @@ impl CPU {
             self.program_counter += 1;
 
             match opscode {
-                // this will implement LDA (0xA9) opcode. 0xA9 is the LDA Immediate instruction in
+                // This will implement LDA (0xA9) opcode. 0xA9 is the LDA Immediate instruction in
                 // the 6502 CPU.
                 //
                 // 0x42 tells the CPU to execute a specific operation: LDA Immediate. An opscode is
@@ -314,7 +445,7 @@ impl CPU {
                 // Immediate value refers to the constant value that is directly embedded in the
                 // instruction itself, rather than being fetched from memory or calculated
                 // directly.
-                0xA9 => {
+                0xA9 | 0xa5 | 0xb4 | 0xad | 0xbd | 0xb9 | 0xa1 | 0xb1 => {
                     self.lda(&AddressingMode::Immediate);
                     self.program_counter += 1;
                 }
