@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
 mod cpu;
+mod opcodes;
 // this file is overly commented because I'm learning Rust while I program. I want just want to
 // thnk aloud.
 #[tokio::main]
