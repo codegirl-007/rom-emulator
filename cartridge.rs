@@ -141,11 +141,13 @@ pub mod test {
 
         assert_eq!(
             rom.chr_rom,
-            vec!(2; 1 * CHR_ROM_PAGE_SIZE, "CHR ROM data mismatch")
+            vec![2; 1 * CHR_ROM_PAGE_SIZE],
+            "CHR ROM data mismatch"
         );
         assert_eq!(
             rom.prg_rom,
-            vec!(1; 2 * PRG_ROM_PAGE_SIZE, "PRG ROM data mismatch")
+            vec![1; 2 * PRG_ROM_PAGE_SIZE],
+            "PRG ROM data mismatch"
         );
         assert_eq!(rom.mapper, 3, "Mapper value mismatch");
         assert_eq!(

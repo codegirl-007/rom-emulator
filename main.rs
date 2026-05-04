@@ -1,14 +1,17 @@
 pub mod cpu;
 pub mod opcodes;
+pub mod bus;
 use cpu::Mem;
 use cpu::CPU;
+use bus::Bus;
 use rand::Rng;
-use sdl2::event::Event;
-use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
 use sdl2::pixels::PixelFormatEnum;
 use sdl2::EventPump;
+use sdl2::sys;
+use std::mem::MaybeUninit;
 mod cartridge;
+use cartridge::test::test_rom;
 
 extern crate lazy_static;
 
@@ -49,38 +52,33 @@ fn read_screen_state(cpu: &CPU, frame: &mut [u8; 32 * 3 * 32]) -> bool {
 }
 
 fn handle_user_input(cpu: &mut CPU, event_pump: &mut EventPump) {
-    for event in event_pump.poll_iter() {
-        match event {
-            Event::Quit { .. }
-            | Event::KeyDown {
-                keycode: Some(Keycode::Escape),
-                ..
-            } => std::process::exit(0),
-            Event::KeyDown {
-                keycode: Some(Keycode::W),
-                ..
-            } => {
-                cpu.mem_write(0xff, 0x77);
+    let _keep_event_pump_alive = event_pump;
+
+    loop {
+        let mut raw_event = MaybeUninit::<sys::SDL_Event>::uninit();
+        let has_event = unsafe { sys::SDL_PollEvent(raw_event.as_mut_ptr()) == 1 };
+
+        if !has_event {
+            break;
+        }
+
+        let raw_event = unsafe { raw_event.assume_init() };
+        let event_type = unsafe { raw_event.type_ };
+
+        match event_type {
+            value if value == sys::SDL_EventType::SDL_QUIT as u32 => std::process::exit(0),
+            value if value == sys::SDL_EventType::SDL_KEYDOWN as u32 => {
+                let keycode = unsafe { raw_event.key.keysym.sym };
+                match keycode {
+                    value if value == sys::SDL_KeyCode::SDLK_ESCAPE as i32 => std::process::exit(0),
+                    value if value == sys::SDL_KeyCode::SDLK_w as i32 => cpu.mem_write(0xff, 0x77),
+                    value if value == sys::SDL_KeyCode::SDLK_s as i32 => cpu.mem_write(0xff, 0x73),
+                    value if value == sys::SDL_KeyCode::SDLK_a as i32 => cpu.mem_write(0xff, 0x61),
+                    value if value == sys::SDL_KeyCode::SDLK_d as i32 => cpu.mem_write(0xff, 0x64),
+                    _ => {}
+                }
             }
-            Event::KeyDown {
-                keycode: Some(Keycode::S),
-                ..
-            } => {
-                cpu.mem_write(0xff, 0x73);
-            }
-            Event::KeyDown {
-                keycode: Some(Keycode::A),
-                ..
-            } => {
-                cpu.mem_write(0xff, 0x61);
-            }
-            Event::KeyDown {
-                keycode: Some(Keycode::D),
-                ..
-            } => {
-                cpu.mem_write(0xff, 0x64);
-            }
-            _ => { /* do nothing */ }
+            _ => {}
         }
     }
 }
@@ -129,9 +127,9 @@ fn main() {
     ];
 
     //load the game
-    let mut cpu = CPU::new();
+    let mut cpu = CPU::new(Bus::new(test_rom(vec![])));
     cpu.load(game_code);
-    cpu.reset();
+    cpu.reset_to(0x0600);
 
     println!("Program has started!");
 

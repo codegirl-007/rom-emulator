@@ -3,6 +3,7 @@ use std::collections::HashMap;
 // This is all new to me so it's heavily commented so we can understand what is happening.
 use bitflags::bitflags;
 
+use crate::bus::Bus;
 use crate::opcodes;
 
 bitflags! {
@@ -95,10 +96,9 @@ pub struct CPU {
     // for addressing memory. Can also be used as temporary storage space or to manipulate data for
     // computations
     pub register_y: u8,
-    // this creates an array with size of 0xFFFF and initializes all elements to 0 (see below in t
-    // he new function). 0xFFFF is hexadecimal for 65535 in decimal. This defines the size of the
-    // array with 65535 elements, the typical size for a 6502 CPU system.
-    memory: [u8; 0xFFFF],
+    // The bus owns the memory map and routes CPU accesses to RAM, ROM, and eventually other
+    // devices such as the PPU and controllers.
+    bus: Bus,
     pub stack_pointer: u8,
 }
 
@@ -133,23 +133,31 @@ pub trait Mem {
 
 impl Mem for CPU {
     fn mem_read(&self, addr: u16) -> u8 {
-        self.memory[addr as usize]
+        self.bus.mem_read(addr)
     }
 
     fn mem_write(&mut self, addr: u16, data: u8) {
-        self.memory[addr as usize] = data;
+        self.bus.mem_write(addr, data);
     }
 }
 
 impl CPU {
-    pub fn new() -> Self {
+    fn reset_registers(&mut self) {
+        self.register_a = 0;
+        self.register_x = 0;
+        self.register_y = 0;
+        self.status = CpuFlags::from_bits_truncate(0b100100);
+        self.stack_pointer = STACK_RESET;
+    }
+
+    pub fn new(bus: Bus) -> Self {
         CPU {
             register_a: 0,
             status: CpuFlags::from_bits_truncate(0b100100),
             program_counter: 0,
             register_x: 0,
             register_y: 0,
-            memory: [0; 0xFFFF],
+            bus,
             stack_pointer: STACK_RESET,
         }
     }
@@ -262,24 +270,30 @@ impl CPU {
     /// Road the program, reset the state of the cpu and then run the program.
     pub fn load_and_run(&mut self, program: Vec<u8>) {
         self.load(program);
-        self.program_counter = self.mem_read_u16(0xFFFC);
+        self.reset_registers();
+        self.program_counter = 0x0600;
         self.run();
     }
 
     /// Reset the state of the CPU
     pub fn reset(&mut self) {
-        self.register_a = 0;
-        self.register_x = 0;
-        self.status = CpuFlags::from_bits_truncate(0b100100);
-
+        self.reset_registers();
         self.program_counter = self.mem_read_u16(0xFFFC);
+    }
+
+    /// Reset the CPU to a caller-provided entrypoint. This keeps helper and test programs in RAM
+    /// without pretending that writable RAM is cartridge ROM.
+    pub fn reset_to(&mut self, program_counter: u16) {
+        self.reset_registers();
+        self.program_counter = program_counter;
     }
 
     /// Load the program code into memroy starting at address 0x8000. 0x8000 .. 0xFFFF is reserved
     /// from program ROM and we can assume that the instructions should start somewhere here.
     pub fn load(&mut self, program: Vec<u8>) {
-        self.memory[0x0600..(0x0600 + program.len())].copy_from_slice(&program[..]);
-        self.mem_write_u16(0xFFFC, 0x0600);
+        for (offset, value) in program.iter().enumerate() {
+            self.mem_write(0x0600 + offset as u16, *value);
+        }
     }
 
     /// Load a value from memory into the Y register    
@@ -946,10 +960,16 @@ impl CPU {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::bus::Bus;
+    use crate::cartridge::test::test_rom;
+
+    fn test_cpu() -> CPU {
+        CPU::new(Bus::new(test_rom(vec![])))
+    }
 
     #[test]
     fn test_0xa9_lda_immediate_load_data() {
-        let mut cpu = CPU::new();
+        let mut cpu = test_cpu();
 
         cpu.load_and_run(vec![0xa9, 0x05, 0x00]);
 
@@ -960,17 +980,19 @@ mod test {
 
     #[test]
     fn test_0xaa_tax_move_a_to_x() {
-        let mut cpu = CPU::new();
+        let mut cpu = test_cpu();
         cpu.register_a = 10;
 
-        cpu.load_and_run(vec![0xaa, 0x00]);
+        cpu.load(vec![0xaa, 0x00]);
+        cpu.program_counter = 0x0600;
+        cpu.run();
 
         assert_eq!(cpu.register_x, 10)
     }
 
     #[test]
     fn test_5_ops_working_together() {
-        let mut cpu = CPU::new();
+        let mut cpu = test_cpu();
 
         cpu.load_and_run(vec![0xa9, 0xc0, 0xaa, 0xe8, 0x00]);
 
@@ -979,17 +1001,19 @@ mod test {
 
     #[test]
     fn test_inx_overflow() {
-        let mut cpu = CPU::new();
+        let mut cpu = test_cpu();
         cpu.register_x = 0xff;
 
-        cpu.load_and_run(vec![0xe8, 0xe8, 0x00]);
+        cpu.load(vec![0xe8, 0xe8, 0x00]);
+        cpu.program_counter = 0x0600;
+        cpu.run();
 
         assert_eq!(cpu.register_x, 1)
     }
 
     #[test]
     fn test_lda_from_memory() {
-        let mut cpu = CPU::new();
+        let mut cpu = test_cpu();
         cpu.mem_write(0x10, 0x55);
 
         cpu.load_and_run(vec![0xa5, 0x10, 0x00]);
