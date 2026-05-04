@@ -23,6 +23,10 @@ pub struct Rom {
 
 impl Rom {
     pub fn new(raw: &Vec<u8>) -> Result<Rom, String> {
+        if raw.len() < 16 {
+            return Err("ROM is too small to contain a valid iNES header".to_string());
+        }
+
         // Check for valid header. Compare the first 4 bytes to NES_TAG
         // We want to ensure that we get the standard iNES format or else we want to error out.
         if &raw[0..4] != NES_TAG {
@@ -65,6 +69,11 @@ impl Rom {
         // starts.
         let prg_rom_start = 16 + if skip_trainer { 512 } else { 0 };
         let chr_rom_start = prg_rom_start + prg_rom_size;
+        let rom_end = chr_rom_start + chr_rom_size;
+
+        if raw.len() < rom_end {
+            return Err("ROM file is truncated".to_string());
+        }
 
         Ok(Rom {
             prg_rom: raw[prg_rom_start..(prg_rom_start + prg_rom_size)].to_vec(),
