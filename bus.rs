@@ -1,4 +1,6 @@
-use crate::{cartridge::Rom, cpu::Mem, joypad::{Joypad, JoypadButton}};
+use std::cell::RefCell;
+
+use crate::{cartridge::Rom, cpu::Mem, joypad::{Joypad, JoypadButton}, ppu::PPU};
 
 const RAM: u16 = 0x0000;
 const RAM_MIRRORS_END: u16 = 0x1FFF;
@@ -14,15 +16,19 @@ pub struct Bus {
     // Keep both controller slots in the bus so CPU input works like any other hardware register.
     joypad1: Joypad,
     joypad2: Joypad,
+    ppu: RefCell<PPU>,
 }
 
 impl Bus {
     pub fn new(rom: Rom) -> Self {
+        let ppu = PPU::new(rom.chr_rom.clone(), rom.screen_mirroring.clone());
+
         Bus {
             cpu_vram: [0; 2048],
             rom,
             joypad1: Joypad::new(),
             joypad2: Joypad::new(),
+            ppu: RefCell::new(ppu),
         }
     }
 
@@ -48,9 +54,13 @@ impl Mem for Bus {
                 self.cpu_vram[mirror_down_addr as usize]
             }
             PPU_REGISTERS..=PPU_REGISTERS_MIRRORS_END => {
-                let _mirror_down_addr = addr & 0b00100000_00000111;
-                // todo!("PPU is not supported yet")
-                0
+                let mut ppu = self.ppu.borrow_mut();
+                match 0x2000 + (addr - 0x2000) % 8 {
+                    0x2002 => ppu.read_status(),
+                    0x2004 => ppu.read_oam_data(),
+                    0x2007 => ppu.read_data(),
+                    _ => 0,
+                }
             }
             // Controller reads are serial: each call returns the next button bit.
             JOYPAD_1 => self.joypad1.read(),
@@ -71,7 +81,17 @@ impl Mem for Bus {
                 self.cpu_vram[mirror_down_addr as usize] = data;
             }
             PPU_REGISTERS..=PPU_REGISTERS_MIRRORS_END => {
-                let _mirror_down_addr = addr & 0b00100000_00000111;
+                let mut ppu = self.ppu.borrow_mut();
+                match 0x2000 + (addr - 0x2000) % 8 {
+                    0x2000 => ppu.write_to_ctrl(data),
+                    0x2001 => ppu.write_to_mask(data),
+                    0x2003 => ppu.write_to_oam_addr(data),
+                    0x2004 => ppu.write_to_oam_data(data),
+                    0x2005 => ppu.write_to_scroll(data),
+                    0x2006 => ppu.write_to_ppu_addr(data),
+                    0x2007 => ppu.write_to_data(data),
+                    _ => {}
+                }
             }
             JOYPAD_1 => {
                 // Writing to 0x4016 updates controller strobe state. Real NES hardware uses the
@@ -114,5 +134,18 @@ mod test {
         assert_eq!(bus.mem_read(JOYPAD_1), 0);
         assert_eq!(bus.mem_read(JOYPAD_1), 0);
         assert_eq!(bus.mem_read(JOYPAD_1), 1);
+    }
+
+    #[test]
+    fn test_ppu_registers_are_mirrored_every_eight_bytes() {
+        let mut bus = Bus::new(test::test_rom(vec![]));
+        bus.mem_write(0x200E, 0x20);
+        bus.mem_write(0x200E, 0x00);
+        bus.mem_write(0x200F, 0x33);
+        bus.mem_write(0x200E, 0x20);
+        bus.mem_write(0x200E, 0x00);
+        bus.mem_read(0x2007);
+
+        assert_eq!(bus.mem_read(0x3FFF), 0x33);
     }
 }
