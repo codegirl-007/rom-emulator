@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use bitflags::bitflags;
 
 use crate::bus::Bus;
+use crate::joypad::JoypadButton;
 use crate::opcodes;
 
 bitflags! {
@@ -160,6 +161,12 @@ impl CPU {
             bus,
             stack_pointer: STACK_RESET,
         }
+    }
+
+    pub fn set_button_pressed(&mut self, button: JoypadButton, pressed: bool) {
+        // Input is still a memory-mapped device, so the CPU just forwards button changes to the
+        // bus rather than storing controller state itself.
+        self.bus.set_button_pressed(button, pressed);
     }
 
     /// Determines the memory address for the operand based on the specified addressing mode.
